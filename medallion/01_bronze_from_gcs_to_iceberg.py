@@ -120,7 +120,7 @@ if missing:
 
 select_sql = ",\n        ".join(select_exprs)
 
-print("SELECT SQL:\n", select_sql)
+print("SELECT SQL FIELDS:\n", select_sql)
 # ============================================================================
 # 4. SCRITTURA SU ICEBERG
 #    DROP necessario: la tabella esistente ha la partizione su feed_date_dt

@@ -6,3 +6,11 @@ output/
 .claude/
 __pycache__/
 *.pyc
+
+# Terraform (infra/)
+infra/.terraform/
+infra/*.tfstate
+infra/*.tfstate.*
+infra/*.tfplan
+infra/terraform.tfvars
+infra/tfplan
