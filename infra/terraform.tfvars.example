@@ -1,0 +1,7 @@
+# Copia in terraform.tfvars e adatta. I valori di default in variables.tf corrispondono all'ambiente attuale.
+project_id                     = "skyita-da-architects-sandbox"
+region                         = "europe-west1"
+location                       = "EU"
+lakehouse_bucket_name          = "dciciani-lakehouse"
+catalog_bucket_name            = "dciciani-lakehouse-catalog"
+dataproc_service_account_email = "dataproc@skyita-da-architects-sandbox.iam.gserviceaccount.com"
