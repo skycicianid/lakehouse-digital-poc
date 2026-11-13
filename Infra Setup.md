@@ -4,10 +4,8 @@
 gcloud artifacts repositories create lakehouse-ar  --repository-format=docker   --location
 =europe-west1
 
-
 ## Create a new Pub/Sub topic
 gcloud pubsub topics create topicTest
-
 
 ## Build Container
 gcloud builds submit --tag europe-west1-docker.pkg.dev/skyita-da-architects-sandbox/lakehouse-ar/pubsub

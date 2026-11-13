@@ -68,6 +68,15 @@ Job: [probe_view.py](probe_view.py). Batch `probe-view-20261113-010212`, SUCCEED
 | `CREATE VIEW` con riferimento alla BQ a tre parti | ERRORE `REQUIRES_SINGLE_PART_NAMESPACE` |
 | Pulizia (viste e namespace) | OK |
 
+Secondo probe, batch `probe-view-20261113-123408`, SUCCEEDED. Ipotesi suggerita da Gemini e verificata:
+
+| Prova | Esito |
+|---|---|
+| `CREATE VIEW` Iceberg con catalog `RESTSessionCatalog` (non fallback su `spark_catalog`) | OK, quindi l'ipotesi "catalogo non registrato come SparkCatalog" è smentita |
+| `CREATE VIEW` con riferimento BQ a due parti (`dciciani.hit_data_stg_test`) con `parentProject` impostato | ERRORE `TABLE_OR_VIEW_NOT_FOUND`: Spark cerca `dciciani` come namespace nel session catalog |
+
+Conclusione: rimuovere il progetto dal nome non basta. Il riferimento diretto alla nativa resta non risolvibile da SQL, come già scritto sopra. `parentProject` agisce sul connettore (DataFrame), non sulla risoluzione SQL dei nomi.
+
 ## Verifica del catalogo BigQuery
 
 Opzione scelta: registrare un catalogo BigQuery in Spark, così la vista potrebbe riferire la nativa direttamente.

@@ -15,11 +15,11 @@ NAMESPACE = sys.argv[2]
 ICEBERG_TABLE = f"`{CATALOG}`.`digital-analytics-myskyapp`.hit_data_stg"
 PROBE_ICEBERG_VIEW = f"`{CATALOG}`.`{NAMESPACE}`.v_probe_iceberg"
 PROBE_BQ_VIEW = f"`{CATALOG}`.`{NAMESPACE}`.v_probe_bq"
-BQ_TABLE = "`skyita-da-architects-sandbox`.`dciciani`.`hit_data_stg_test`"
+BQ_TABLE = "`dciciani`.`hit_data_stg_test`"
 
 spark = SparkSession.builder.appName("test06_probe_view").getOrCreate()
 results = {}
-
+spark.conf.set("parentProject", "skyita-da-architects-sandbox")
 
 def attempt(label, sql):
     try:
@@ -39,12 +39,19 @@ attempt(
 )
 if results["1_VIEW_ICEBERG"] == "OK":
     attempt("1_QUERY_VIEW_ICEBERG", f"SELECT COUNT(*) FROM {PROBE_ICEBERG_VIEW}")
+else:
+    print('Spark cannot resolve Iceberg table in Iceberg view')
 
 # 2. Spark risolve una tabella BigQuery dentro una vista Iceberg?
 attempt(
     "2_VIEW_BQ_REF",
     f"CREATE OR REPLACE VIEW {PROBE_BQ_VIEW} AS SELECT * FROM {BQ_TABLE}",
 )
+if results["2_VIEW_BQ_REF"] == "OK":
+    attempt("2_QUERY_VIEW_BQ", f"SELECT COUNT(*) FROM {PROBE_BQ_VIEW}")
+else:
+    print('Spark cannot resolve BigQuery table in Iceberg view')
+
 
 # Pulizia
 attempt("CLEAN_VIEW_ICEBERG", f"DROP VIEW IF EXISTS {PROBE_ICEBERG_VIEW}")
