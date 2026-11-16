@@ -4,6 +4,11 @@
 Dataproc indipendenti; la materializzazione contiene 15.679 righe e 167 colonne.
 Questo sblocca il test 06. I limiti della PoC complessiva sono indicati sotto.
 
+**PASS anche il test di cut-over (16 novembre 2026).** Con lo storico su BigQuery
+prima del cut-over e i dati correnti su Iceberg dal cut-over in poi, la vista
+restituisce ogni giorno da un solo ramo. Il ramo BigQuery viene escluso dal piano
+nelle query sui soli dati recenti. Vedi [Verifica del cut-over](#verifica-del-cut-over-del-16-novembre-2026).
+
 ## Implementazione
 
 [BigQueryReadOnlyCatalog.java](BigQueryReadOnlyCatalog.java) implementa un
@@ -94,10 +99,9 @@ Adeguare `Expected` ai conteggi prodotti dal setup se cambiano le sorgenti.
   setup. Non è ancora il contratto enterprise con tutti i tipi di business.
 - La JOIN usa `(id_hit_high, id_hit_low)`, come il test 02. Su giorni diversi è
   atteso un risultato vuoto: non dimostra corrispondenze positive fra righe.
-- Questa UNION verifica interoperabilità e persistenza, non continuità al cutover.
-  `-Cutover YYYY-MM-DD` aggiunge `<` sulla nativa e `>=` su Iceberg, ma i giorni
-  attuali hanno ordine inverso rispetto a storico/corrente. Serve un campione
-  coerente per quel test. Il setup rifiuta rami senza righe.
+- La UNION del 13 novembre verifica interoperabilità e persistenza. La continuità
+  al cut-over è verificata a parte, su un campione ordinato (sezione dedicata sotto).
+  Il setup rifiuta rami senza righe.
 - Il test usa la copia sandbox già esistente, senza creare nuove copie delle
   sorgenti. L'accesso del service account alla tabella originale
   `skyita-da-cmp-test.digital_skyita_myskyapp.hit_data_stg`, negato nel test 04,
@@ -153,3 +157,89 @@ L'assenza di un `TableCatalog` nel connettore standard non esclude un adattatore
 sul suo `TableProvider`. Riferimenti:
 [cataloghi Spark/Iceberg](https://iceberg.apache.org/docs/latest/spark-configuration/),
 [connettore ufficiale BigQuery](https://github.com/GoogleCloudDataproc/spark-bigquery-connector).
+
+## Verifica del cut-over del 16 novembre 2026
+
+Obiettivo: lo storico resta su BigQuery fino alla scadenza della retention, i
+dati nuovi stanno su Iceberg, e i job Spark leggono un'unica vista.
+
+### Campione
+
+| Ramo | Oggetto | Giorni (righe) |
+|---|---|---|
+| BigQuery, storico | `skyita-da-architects-sandbox.dciciani.hit_data_stg_hist` | 2026-10-08 (2.171), 2026-10-12 (30.659), 2026-10-13 (7.104) |
+| Iceberg, corrente | `dciciani-lakehouse-catalog.digital-analytics-myskyapp.hit_data_stg` | 2026-10-13 (5.724) |
+
+La copia è una CTAS dall'originale `skyita-da-cmp-test.digital_skyita_myskyapp.hit_data_stg`,
+partizionata per giorno, creata con utenza personale (il service account Dataproc
+non legge l'originale). Nell'originale non ci sono i giorni dal 9 all'11 ottobre.
+Il 13 ottobre è presente su entrambi i lati, con conteggi diversi, per verificare
+che il giorno del cut-over venga letto da un solo ramo. Cut-over: `2026-10-13`.
+
+### Struttura delle viste
+
+Namespace `federation_cutover_20261116b`. Le viste di contratto normalizzano le
+sorgenti senza filtri. Il cut-over sta solo nella vista finale (319 caratteri):
+
+```sql
+SELECT * FROM hit_data_native_contract  WHERE partition_date <  TIMESTAMP '2026-10-13 00:00:00'
+UNION ALL
+SELECT * FROM hit_data_iceberg_contract WHERE partition_date >= TIMESTAMP '2026-10-13 00:00:00'
+```
+
+Quando lo storico è scaduto basta ridefinire questa vista con il solo ramo Iceberg.
+Il nome resta lo stesso e i consumer non cambiano.
+
+**Limite del catalogo REST.** Il primo tentativo metteva il filtro nei contratti.
+Il contratto BigQuery con il filtro (4.094 caratteri) è stato accettato, quello
+Iceberg (4.101 caratteri) è stato rifiutato con `BadRequestException: invalid argument`.
+I contratti senza filtro (4.039 e 4.045 caratteri) sono accettati. Il dato è
+compatibile con un limite di 4.096 caratteri sul testo della vista. Il namespace
+`federation_cutover_20261116` del primo tentativo contiene solo
+`hit_data_native_contract` e può essere eliminato.
+
+### Esito
+
+Batch `poc06-create-20261116-163521` (setup) e `poc06-cutover-check-20261116-163832`
+(consumer indipendente, modalità `cutover-check`), entrambi `STATUS: OK`.
+
+| Verifica | Atteso | Ottenuto |
+|---|---|---|
+| Righe totali della vista | 32.830 + 5.724 = 38.554 | 38.554 |
+| 2026-10-08 / 2026-10-12 | da BigQuery: 2.171 / 30.659 | 2.171 / 30.659 |
+| 2026-10-13 | solo da Iceberg: 5.724 (non 7.104 né 12.828) | 5.724 |
+| JOIN sulla chiave hit (senza cut-over) | corrispondenze sul 13 ottobre | 5.724 righe |
+
+Righe lette da ogni ramo, misurate con la metrica `numOutputRows` degli scan:
+
+| Query sulla vista | Scan BigQuery | Scan Iceberg |
+|---|---|---|
+| `partition_date >= '2026-10-13'` (solo recenti) | **assente dal piano**, nessuna read session | 5.724 |
+| solo `2026-10-08` (un giorno di storico) | 2.171 su 32.830: filtro applicato da BigQuery | 0, filtri contraddittori applicati in planning |
+| tutta la vista | 32.830 | 5.724 |
+
+Conseguenze per la transizione:
+
+- le query sui dati recenti non dipendono da BigQuery: niente costi Storage API,
+  permessi o disponibilità del connettore;
+- le query sullo storico leggono da BigQuery solo i giorni richiesti, perché
+  `partition_date` resta `TIMESTAMP` su entrambi i lati e il contratto non lo converte;
+- il giorno del cut-over non viene duplicato.
+
+### Limiti
+
+- L'eliminazione del ramo BigQuery è un comportamento osservato su Spark 3.5.3
+  (Dataproc 2.3). Va ricontrollata a ogni aggiornamento del runtime, insieme
+  all'adattatore: `run.ps1 -Mode cutover-check` serve come test di regressione.
+- Campione di 38.554 righe: prestazioni e costi su volumi reali sono ancora da misurare.
+- Il pruning è garantito solo per i filtri su `partition_date`. Filtri su colonne
+  convertite dal contratto (`CAST ... AS STRING`) potrebbero non arrivare a BigQuery.
+
+### Riesecuzione
+
+```powershell
+./tests/06_spark_iceberg_view/run.ps1 -Mode create -Namespace <nuovo_namespace> `
+  -Native skyita-da-architects-sandbox.dciciani.hit_data_stg_hist -Cutover 2026-10-13
+./tests/06_spark_iceberg_view/run.ps1 -Mode cutover-check -Namespace <nuovo_namespace> `
+  -Native skyita-da-architects-sandbox.dciciani.hit_data_stg_hist -Cutover 2026-10-13
+```

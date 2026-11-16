@@ -1,5 +1,5 @@
 param(
-    [ValidateSet('build', 'create', 'verify')][string]$Mode = 'create',
+    [ValidateSet('build', 'create', 'verify', 'cutover-check')][string]$Mode = 'create',
     [string]$Namespace = 'federation_layered_20261113',
     [string]$Project = 'skyita-da-architects-sandbox',
     [string]$Region = 'europe-west1',
