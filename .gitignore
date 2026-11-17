@@ -1,6 +1,5 @@
 example/
 download/
-python-docs-samples/
 .env
 output/
 .claude/

@@ -14,7 +14,7 @@ DATAPROC_VERSION="2.3"
 SPARK_AVRO_PKG="org.apache.spark:spark-avro_2.13:3.5.3"
 SCRIPT_LOCAL="${HERE}/medallion/01_bronze_from_gcs_to_iceberg.py"
 SCRIPT_GCS="gs://dciciani-lakehouse/digital-poc/script/01_bronze_from_gcs_to_iceberg.py"
-MAPPING_LOCAL="${HERE}/mapping/field_mapping.json"
+MAPPING_LOCAL="${HERE}/config/field_mapping.json"
 MAPPING_GCS="gs://dciciani-lakehouse/digital-poc/script/field_mapping.json"
 
 # read_env KEY: restituisce il valore di KEY nel .env (tollera spazi attorno a '=')
