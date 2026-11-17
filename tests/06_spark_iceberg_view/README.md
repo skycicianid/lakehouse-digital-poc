@@ -1,8 +1,16 @@
 # Test 06: vista Iceberg creata con Spark su tabella nativa BigQuery e tabella Iceberg
 
+> Aggiornamento del 13 novembre 2026: creazione e lettura delle viste UNION e JOIN
+> riuscite con un adattatore di catalogo Spark per BigQuery: 167 colonne e 15.679
+> righe nell'UNION. PASS anche rilettura da batch indipendente e materializzazione.
+> Vedi [correzione e verifica](SOLUTION.md).
+> Le conclusioni sotto sono la diagnosi storica prima dell'adattatore.
+
 **Obiettivo.** Creare con Spark una vista Iceberg che unisca (union e join) una tabella nativa BigQuery e una tabella Iceberg, rileggerla con Spark e riscriverla come tabella Iceberg materializzata, senza logica aggiuntiva.
 
-**Stato: NON ESEGUITO. Infattibile nella forma richiesta.** Non è stato scritto nessun job Spark e non è stata creata nessuna vista o tabella. Le conclusioni sono sotto.
+**Stato attuale: PASS sul campione sandbox**, con rilettura da batch indipendente e materializzazione; vedi [SOLUTION.md](SOLUTION.md).
+
+**Diagnosi storica, superata dalla correzione.** Al momento delle verifiche descritte sotto il job del test non era ancora stato scritto e la soluzione era stata considerata infattibile con il solo connettore standard.
 
 ## Oggetti previsti
 
