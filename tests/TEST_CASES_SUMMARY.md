@@ -1,6 +1,6 @@
 # Test Cases Summary – Lakehouse Digital POC
 
-Analisi statica della directory `tests/` (commit `180a376`, 17/11/2026), aggiornata il 18/11/2026 per il test 06. Per l'analisi del 17/11 non è stato eseguito nessun job: gli esiti sono quelli documentati nei README del repository. L'aggiornamento del 18/11 riporta tre batch del test 06 rieseguiti con il catalogo BigQuery nativo del connettore.
+Analisi statica della directory `tests/` (commit `180a376`, 17/11/2026), aggiornata il 18/11/2026 per i test 05 e 06. Per l'analisi del 17/11 non è stato eseguito nessun job: gli esiti sono quelli documentati nei README del repository. L'aggiornamento del 18/11 riporta tre batch del test 06 rieseguiti con il catalogo BigQuery nativo del connettore e la nuova vista BigQuery con cut-over del test 05 (`run_cutover.ps1`).
 
 ## 1. Overview
 
@@ -28,7 +28,7 @@ I sei test del repository (`01`–`06`) sono mappati sui quattro scenari richies
 |---|---|---|---|---|---|
 | TC-01 | BigQuery → BQ + Iceberg | Lettura diretta delle due sorgenti | `01_union_all/query.sql`, `02_join/query.sql`, `03_values_compare/query.sql`, `03_values_compare/diagnose_mismatch_per_column.sql` | **Implementato e verificato** | Legge la nativa **originale**. UNION (15.679 righe), JOIN 1:1 (5.724) e confronto valori (0 differenze su 162 colonne) documentati il 12/11. Nessuna assertion nell'SQL. |
 | TC-02 | Spark → BQ + Iceberg | Lettura diretta delle due sorgenti | `04_dataproc_union_iceberg/job.py`, `04_dataproc_union_iceberg/run.sh` | **Implementato e verificato** | Batch `union-iceberg-bq-20261113-000517` SUCCEEDED, `STATUS: OK`, 15.679 righe. La nativa letta è una **copia sandbox**: il SA Dataproc riceve 403 sull'originale. Verifica solo sui conteggi. |
-| TC-03 | BigQuery → Vista unificata | Lettura della vista che combina BQ e Iceberg | `05_bq_union_view/query.sql`, `05_bq_union_view/join_view.sql` | **Implementato e verificato** | Viste `dciciani.hit_data_union_view` (15.679 righe) e `dciciani.hit_data_join_view` create. Nel repository ci sono solo le DDL: le query di lettura usate per la verifica non sono versionate. La vista non applica il cut-over. |
+| TC-03 | BigQuery → Vista unificata | Lettura della vista che combina BQ e Iceberg | `05_bq_union_view/query.sql`, `05_bq_union_view/join_view.sql`, `05_bq_union_view/cutover_view.sql`, `05_bq_union_view/run_cutover.ps1` | **Implementato e verificato, con cut-over** | Viste `dciciani.hit_data_union_view` (15.679 righe) e `dciciani.hit_data_join_view` (13/11, senza cut-over). Dal 18/11 `dciciani.hit_data_cutover_view` applica il cut-over come il test 06: 38.554 righe, il 13/10 solo da Iceberg, sorgente letta verificata dalle statistiche del job. Controlli nello script, esiti salvati in `results/`. |
 | TC-04 | Spark → Vista unificata | Lettura della vista che combina BQ e Iceberg | `06_spark_iceberg_view/job.py`, `06_spark_iceberg_view/run.ps1`, `06_spark_iceberg_view/SOLUTION.md` | **Implementato e verificato (variante vista Iceberg)** | Spark legge una vista unificata **Iceberg** nel catalog Lakehouse che referenzia direttamente la tabella BigQuery tramite il catalogo nativo `BigQueryCatalog`, senza codice custom. Batch del 18/11 `poc06-create-20261118-093051`, `poc06-cutover-check-20261118-093420`, `poc06-verify-20261118-093733`, tutti `STATUS: OK`: 38.554 righe, cut-over e scelta della sorgente per data verificati. Non è una **vista BigQuery**: nessun codice legge da Spark le viste del test 05. |
 
 ## 3. Dettaglio dei casi di test
@@ -78,7 +78,7 @@ I sei test del repository (`01`–`06`) sono mappati sui quattro scenari richies
   - Le query di consumo (`SELECT COUNT(*) FROM ...view`) non sono nel repository: l'esito non è riproducibile dal solo codice.
   - Anche qui la sorgente nativa è la copia sandbox, non l'originale.
   - La vista JOIN produce un prodotto cartesiano per visitatore su giorni diversi (fino a 68.080 righe per un singolo `id_mcvis`). Prova che la JOIN funziona tecnicamente, ma il risultato non ha significato di business.
-  - Il cut-over (storico BQ < data, Iceberg ≥ data) richiesto da `poc.md` non è implementato nella vista BigQuery. Esiste solo nella variante Spark del test 06.
+  - ~~Il cut-over richiesto da `poc.md` non è implementato nella vista BigQuery.~~ Risolto il 18/11 con `hit_data_cutover_view` (`cutover_view.sql`, `run_cutover.ps1`), sullo stesso campione del test 06 (`hit_data_stg_hist`, cut-over 2026-10-13). Run `create` `20261118_113512` e `cutover-check` `20261118_113834`, entrambi `STATUS: OK`. Risultato: 38.554 righe e il 13/10 solo da Iceberg (5.724, non 7.104). Per i dati recenti BigQuery legge 0 partizioni native; per un giorno di storico legge 1 partizione e non legge Iceberg (`objectStorageBytesRead` assente). Il query plan BigQuery unisce le due letture in un solo stage, quindi la sorgente letta si ricava da `totalPartitionsProcessed` e `objectStorageStats`. I controlli sono nello script, eseguito con utenza personale.
 
 ### TC-04 – Spark Job: lettura tramite vista unificata
 
@@ -117,7 +117,7 @@ I sei test del repository (`01`–`06`) sono mappati sui quattro scenari richies
 | Copertura scenari | 4 scenari | TC-01, TC-02, TC-03 coperti; TC-04 in variante | Manca la lettura Spark di una **vista BigQuery** |
 | Sorgente BigQuery | Tabella nativa | TC-01 sull'originale; TC-02/03/04 su copie CTAS sandbox (`hit_data_stg_test`, `hit_data_stg_hist`) | Il SA Dataproc non legge l'originale (403): requisito IAM aperto |
 | Sorgente Iceberg | Tabella Iceberg | Stessa tabella in tutti i test (5.724 righe, solo 13/10) | Campione minimo, una sola partizione |
-| Vista unificata | Vista usata come unico punto di accesso | BigQuery: vista logica (test 05). Spark: vista Iceberg persistente (test 06) con il catalogo BigQuery nativo del connettore, senza codice custom | Due viste distinte, nessuna condivisa; la vista BQ non ha il cut-over |
+| Vista unificata | Vista usata come unico punto di accesso | BigQuery: vista logica (test 05). Spark: vista Iceberg persistente (test 06) con il catalogo BigQuery nativo del connettore, senza codice custom | Due viste distinte, nessuna condivisa; dal 18/11 entrambe con lo stesso cut-over e gli stessi conteggi (valori non confrontati tra engine) |
 | Componenti custom | Soluzione con componenti nativi | Dal 18/11 il test 06 usa `BigQueryCatalog` del connettore al posto di `BigQueryReadOnlyCatalog` | `COUNT(*)` senza colonne su `bq.` non provato; sola lettura da garantire via IAM |
 | Diretto vs vista | Distinzione netta | Rispettata: 01–04 diretti, 05–06 tramite vista | — |
 | Spark → vista BQ | Lettura della vista BigQuery | Non tentata | Servono `viewsEnabled`, un `materializationDataset` e `bigquery.jobs.create` (non verificato) |
@@ -133,7 +133,7 @@ I sei test del repository (`01`–`06`) sono mappati sui quattro scenari richies
 - **Scenari verificati (evidenza documentata):** TC-01 (con confronto dei valori), TC-02 e TC-03 (sui conteggi). Per TC-04 è verificata la variante Iceberg, inclusi lettura da batch indipendente, materializzazione e pruning al cut-over, prima con il catalogo custom (13 e 16/11) e poi con quello nativo (18/11, rieseguito). Le altre evidenze sono dichiarative (README e batch ID) e non sono state rieseguite in questa analisi.
 - **Da completare o correggere:**
   1. TC-04 come formulato: provare la lettura da Spark di `dciciani.hit_data_union_view` (connettore con `viewsEnabled=true` e `materializationDataset`), oppure formalizzare che la vista Iceberg del test 06 sostituisce il requisito, coerentemente con `poc.md`.
-  2. Versionare le query di consumo del test 05 e aggiungere il cut-over alla vista BigQuery.
+  2. ~~Versionare le query di consumo del test 05 e aggiungere il cut-over alla vista BigQuery.~~ Fatto il 18/11 per la vista con cut-over (`run_cutover.ps1`); le query di lettura delle viste del 13/11 restano non versionate.
   3. Aggiornare `04_dataproc_union_iceberg/README.md` ("Da eseguire" superato). I README del test 06 sono stati aggiornati il 18/11.
   4. Aggiungere un'assertion sul conteggio di `hit_data_join_view` nel test 06.
   5. Test 06: provare un `COUNT(*)` diretto su `bq.` con il catalogo nativo, per capire se serve `bigquery.jobs.create`. Dal 18/11 il catalogo nativo è il default di `run.ps1` (`-CustomCatalog` per quello precedente).

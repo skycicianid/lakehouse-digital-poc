@@ -204,7 +204,8 @@ escludono tutti i file, quindi non legge dati. Gli altri nodi (`ColumnarToRow`,
   su `partition_date`. Filtri su colonne convertite a `STRING` dal contratto potrebbero
   non arrivare a BigQuery: il risultato resta corretto, ma BigQuery legge più dati.
 - **Solo Spark.** La vista è SQL Spark e altri motori non la leggono. BigQuery usa la
-  propria vista (test 05), che non ha il cut-over.
+  propria vista: dal 18/11 `dciciani.hit_data_cutover_view` (test 05), con lo stesso
+  cut-over e gli stessi conteggi.
 - **Limite di dimensione delle viste.** Circa 4.096 caratteri nel catalog REST:
   impone i due livelli di viste.
 - **Volumi.** Campione di 38.554 righe: prestazioni e costi della Storage Read API su

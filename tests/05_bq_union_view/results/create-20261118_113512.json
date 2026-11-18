@@ -1,0 +1,17 @@
+﻿{
+    "mode":  "create",
+    "run_id":  "20261118_113512",
+    "view":  "skyita-da-architects-sandbox.dciciani.hit_data_cutover_view",
+    "native":  "skyita-da-architects-sandbox.dciciani.hit_data_stg_hist",
+    "iceberg":  "skyita-da-architects-sandbox.dciciani-lakehouse-catalog.digital-analytics-myskyapp.hit_data_stg",
+    "cutover":  "2026-10-13",
+    "source_counts":  {
+                          "bigquery":  32830,
+                          "iceberg":  5724
+                      },
+    "view_rows":  38554,
+    "failures":  [
+
+                 ],
+    "status":  "OK"
+}

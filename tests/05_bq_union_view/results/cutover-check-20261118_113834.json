@@ -1,0 +1,86 @@
+﻿{
+    "mode":  "cutover-check",
+    "run_id":  "20261118_113834",
+    "view":  "skyita-da-architects-sandbox.dciciani.hit_data_cutover_view",
+    "native":  "skyita-da-architects-sandbox.dciciani.hit_data_stg_hist",
+    "iceberg":  "skyita-da-architects-sandbox.dciciani-lakehouse-catalog.digital-analytics-myskyapp.hit_data_stg",
+    "cutover":  "2026-10-13",
+    "native_days":  {
+                        "2026-10-12":  30659,
+                        "2026-10-08":  2171,
+                        "2026-10-13":  7104
+                    },
+    "iceberg_days":  {
+                         "2026-10-13":  5724
+                     },
+    "view_days":  {
+                      "2026-10-12":  30659,
+                      "2026-10-08":  2171,
+                      "2026-10-13":  5724
+                  },
+    "expected_days":  {
+                          "2026-10-12":  30659,
+                          "2026-10-08":  2171,
+                          "2026-10-13":  5724
+                      },
+    "pruning":  {
+                    "recent_only":  {
+                                        "job_id":  "poc05_check_recent_only_20261118_113834",
+                                        "where":  "partition_date \u003e= TIMESTAMP \u00272026-10-13 00:00:00\u0027",
+                                        "rows":  5724,
+                                        "expected":  5724,
+                                        "expected_native_partitions":  0,
+                                        "expected_iceberg_read":  true,
+                                        "stats":  {
+                                                      "native_partitions":  0,
+                                                      "native_bytes_estimated":  0,
+                                                      "iceberg_storage_bytes":  131157,
+                                                      "input_records_total":  5724,
+                                                      "bytes_processed":  45792,
+                                                      "bytes_billed":  20971520,
+                                                      "slot_ms":  141
+                                                  },
+                                        "pass":  true
+                                    },
+                    "single_history_day":  {
+                                               "job_id":  "poc05_check_single_history_day_20261118_113834",
+                                               "where":  "partition_date \u003e= TIMESTAMP \u00272026-10-08 00:00:00\u0027 AND partition_date \u003c TIMESTAMP_ADD(TIMESTAMP \u00272026-10-08 00:00:00\u0027, INTERVAL 1 DAY)",
+                                               "rows":  2171,
+                                               "expected":  2171,
+                                               "expected_native_partitions":  1,
+                                               "expected_iceberg_read":  false,
+                                               "stats":  {
+                                                             "native_partitions":  1,
+                                                             "native_bytes_estimated":  17368,
+                                                             "iceberg_storage_bytes":  0,
+                                                             "input_records_total":  2171,
+                                                             "bytes_processed":  17368,
+                                                             "bytes_billed":  20971520,
+                                                             "slot_ms":  47
+                                                         },
+                                               "pass":  true
+                                           },
+                    "across_cutover":  {
+                                           "job_id":  "poc05_check_across_cutover_20261118_113834",
+                                           "where":  "partition_date IS NOT NULL",
+                                           "rows":  38554,
+                                           "expected":  38554,
+                                           "expected_native_partitions":  2,
+                                           "expected_iceberg_read":  true,
+                                           "stats":  {
+                                                         "native_partitions":  2,
+                                                         "native_bytes_estimated":  262640,
+                                                         "iceberg_storage_bytes":  131157,
+                                                         "input_records_total":  38554,
+                                                         "bytes_processed":  308432,
+                                                         "bytes_billed":  20971520,
+                                                         "slot_ms":  112
+                                                     },
+                                           "pass":  true
+                                       }
+                },
+    "failures":  [
+
+                 ],
+    "status":  "OK"
+}
