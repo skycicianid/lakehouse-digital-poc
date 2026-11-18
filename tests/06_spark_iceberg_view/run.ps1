@@ -8,7 +8,12 @@ param(
     [int]$Expected = -1,
     [switch]$Materialize,
     [string]$Native = 'skyita-da-architects-sandbox.dciciani.hit_data_stg_test',
-    [string]$Cutover
+    [string]$Cutover,
+    # Default: the connector's built-in com.google.cloud.spark.bigquery.BigQueryCatalog (>= 0.42.0),
+    # no JAR needed. -CustomCatalog uses the legacy BigQueryReadOnlyCatalog JAR (built with -Mode build).
+    [switch]$CustomCatalog,
+    # Optional: force the Dataproc-provided connector version (dataproc.sparkBqConnector.version).
+    [string]$ConnectorVersion
 )
 $ErrorActionPreference = 'Stop'
 
@@ -28,14 +33,18 @@ if ($Mode -eq 'build') {
     Invoke-Gcloud dataproc batches submit pyspark "$ArtifactPrefix/build_catalog.py" @common "--files=$ArtifactPrefix/BigQueryReadOnlyCatalog.java" '--' "$ArtifactPrefix/bigquery-readonly-catalog.jar"
 } else {
     Invoke-Gcloud storage cp "$PSScriptRoot/job.py" "$ArtifactPrefix/job.py" "--project=$Project"
-    $properties = @(
+    $catalogClass = if ($CustomCatalog) { 'poc.BigQueryReadOnlyCatalog' } else { 'com.google.cloud.spark.bigquery.BigQueryCatalog' }
+    $propertyList = @(
         "dataproc.lakehouse.catalog.$Catalog=projects/$Project/catalogs/$Catalog",
-        'spark.sql.catalog.bq=poc.BigQueryReadOnlyCatalog',
+        "spark.sql.catalog.bq=$catalogClass",
         "spark.sql.catalog.bq.parentProject=$Project"
-    ) -join ','
+    )
+    if ($ConnectorVersion) { $propertyList += "dataproc.sparkBqConnector.version=$ConnectorVersion" }
+    $properties = $propertyList -join ','
+    $jarArgs = if ($CustomCatalog) { @("--jars=$ArtifactPrefix/bigquery-readonly-catalog.jar") } else { @() }
     $jobArgs = @($Catalog, $Namespace, '--mode', $Mode, '--native', $Native)
     if ($Expected -ge 0) { $jobArgs += @('--expected', "$Expected") }
     if ($Materialize) { $jobArgs += '--materialize' }
     if ($Cutover) { $jobArgs += @('--cutover', $Cutover) }
-    Invoke-Gcloud dataproc batches submit pyspark "$ArtifactPrefix/job.py" @common "--jars=$ArtifactPrefix/bigquery-readonly-catalog.jar" "--properties=$properties" '--' @jobArgs
+    Invoke-Gcloud dataproc batches submit pyspark "$ArtifactPrefix/job.py" @common @jarArgs "--properties=$properties" '--' @jobArgs
 }

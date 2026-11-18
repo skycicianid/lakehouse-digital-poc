@@ -1,167 +1,133 @@
-# Correzione del test 06
+# Test 06: soluzione con il catalogo BigQuery nativo
 
-**PASS sul campione sandbox.** Le viste sono state create e rilette da due batch
-Dataproc indipendenti; la materializzazione contiene 15.679 righe e 167 colonne.
-Questo sblocca il test 06. I limiti della PoC complessiva sono indicati sotto.
+Questo documento spiega come funziona la soluzione del test 06, come è stata verificata
+e come si è arrivati a questa versione. La panoramica è nel [README](README.md).
 
-**PASS anche il test di cut-over (16 novembre 2026).** Con lo storico su BigQuery
-prima del cut-over e i dati correnti su Iceberg dal cut-over in poi, la vista
-restituisce ogni giorno da un solo ramo. Il ramo BigQuery viene escluso dal piano
-nelle query sui soli dati recenti. Vedi [Verifica del cut-over](#verifica-del-cut-over-del-16-novembre-2026).
+## 1. Il problema
 
-## Implementazione
+Una vista Iceberg salva solo il testo SQL nel catalog. Quando un job la legge, Spark
+deve capire a quale sistema appartiene ogni nome di tabella, e lo fa dal primo
+elemento del nome, che deve corrispondere a un **catalogo registrato** nella sessione:
 
-[BigQueryReadOnlyCatalog.java](BigQueryReadOnlyCatalog.java) implementa un
-`TableCatalog` Spark che risolve `bq.project.dataset.table` e delega schema e scan
-al provider ufficiale `Spark35BigQueryTableProvider`, incluso in Dataproc 2.3.
-Mantiene le opzioni della tabella in ogni scan e pubblica solo `BATCH_READ`.
-Non aggiunge storage o un motore di federazione.
+```sql
+SELECT ... FROM bq.`skyita-da-architects-sandbox`.dciciani.hit_data_stg_hist   -- catalogo "bq"
+UNION ALL
+SELECT ... FROM `dciciani-lakehouse-catalog`.`digital-analytics-myskyapp`.hit_data_stg  -- catalogo Lakehouse
+```
 
-Le viste UNION e JOIN vengono salvate nel catalogo Iceberg esistente. Due viste
-di contratto normalizzano separatamente le sorgenti: la UNION finale le referenzia
-con una definizione compatta. Non serve
-un Hive Metastore: i riferimenti BigQuery si risolvono dal catalogo configurato
-in ogni nuovo batch. Il consumer carica il JAR e configura i due cataloghi:
+Il catalogo Lakehouse per Iceberg era già configurato su Dataproc. Per BigQuery
+serviva un catalogo Spark, cioè una classe che implementa `TableCatalog`. Senza,
+il nome BigQuery non viene risolto e la vista non si può creare (vedi §9).
+
+Leggere BigQuery come DataFrame (`spark.read.format("bigquery")`, test 04) non basta:
+il DataFrame esiste solo dentro il job e non può essere referenziato da una vista
+persistente.
+
+## 2. La soluzione: `BigQueryCatalog` del connettore ufficiale
+
+Il connettore Spark-BigQuery di Google include, dalla versione 0.42.0, il catalogo
+`com.google.cloud.spark.bigquery.BigQueryCatalog`. Si trova nell'artefatto
+DataSource V2 `spark-3.5-bigquery`, già presente nel runtime Dataproc 2.3. Google lo
+documenta per Spark gestito:
+[Query BigQuery tables](https://docs.cloud.google.com/managed-spark/docs/guides/query-bigquery-tables).
+Si attiva con due properties del batch:
+
+```text
+spark.sql.catalog.bq=com.google.cloud.spark.bigquery.BigQueryCatalog
+spark.sql.catalog.bq.parentProject=skyita-da-architects-sandbox
+```
+
+Con queste properties il nome `bq.progetto.dataset.tabella` viene risolto come
+tabella BigQuery. Il catalogo accetta nomi a due parti (`bq.dataset.tabella`) e a tre
+(`bq.progetto.dataset.tabella`). Le letture passano dal provider DataSource V2 del
+connettore, cioè dalla BigQuery Storage Read API, con filtri e selezione delle
+colonne applicati da BigQuery.
+
+Non servono JAR, Hive Metastore o forzature della versione del connettore
+(`dataproc.sparkBqConnector.version`): il connettore preinstallato in Dataproc 2.3
+include già la classe.
+
+`run.ps1` imposta queste properties per default e non carica `--jars`.
+`job.py` è lo stesso della soluzione custom, perché il formato dei nomi non cambia.
+
+## 3. Struttura delle viste
+
+Il setup (`--mode create`) crea quattro viste Iceberg in un namespace dedicato del
+catalog Lakehouse. Le sorgenti non vengono modificate.
+
+| Vista | Contenuto |
+|---|---|
+| `hit_data_native_contract` | `SELECT` delle 167 colonne della tabella BigQuery, convertite al contratto comune |
+| `hit_data_iceberg_contract` | Stessa cosa per la tabella Iceberg |
+| `hit_data_union_view` | La vista per gli utenti: `UNION ALL` dei due contratti con il filtro di cut-over |
+| `hit_data_join_view` | `JOIN` tra BigQuery e Iceberg sulla chiave hit `(id_hit_high, id_hit_low)` |
+
+**Contratto.** Le due sorgenti devono avere le stesse colonne, altrimenti il setup si
+ferma. Ogni colonna viene portata a `STRING`, tranne `partition_date`, che resta
+`TIMESTAMP` su entrambi i lati. È il contratto di test già usato nel test 04, non
+quello con i tipi di business.
+
+**Vista finale con cut-over** (331 caratteri):
+
+```sql
+SELECT * FROM hit_data_native_contract  WHERE partition_date <  TIMESTAMP '2026-10-13 00:00:00'
+UNION ALL
+SELECT * FROM hit_data_iceberg_contract WHERE partition_date >= TIMESTAMP '2026-10-13 00:00:00'
+```
+
+Ogni giorno arriva da un solo ramo, anche quando è presente in entrambe le sorgenti.
+Quando lo storico BigQuery scade basta ridefinire questa vista con il solo ramo
+Iceberg: il nome resta lo stesso e le query degli utenti non cambiano.
+
+**Perché due livelli di viste.** Il catalog REST rifiuta con
+`BadRequestException: invalid argument` le viste il cui testo SQL supera circa
+4.096 caratteri (valore dedotto dalle prove, non documentato). La `UNION` in una
+sola vista, con 167 colonne per ramo, superava gli 8.000 caratteri. I due contratti
+(4.039 e 4.045 caratteri) restano sotto il limite, e la vista finale li richiama per
+nome. Il filtro di cut-over va nella vista finale perché, messo nei contratti,
+fa superare il limite a quello Iceberg (4.101 caratteri).
+
+## 4. Cosa succede quando un utente interroga la vista
 
 ```python
-df = spark.table(
-    "`dciciani-lakehouse-catalog`.federation_layered_20261113.hit_data_union_view"
-)
+spark.table("`dciciani-lakehouse-catalog`.federation_native_catalog_20261118.hit_data_union_view") \
+     .where("partition_date >= '2026-10-13'")
 ```
 
-Lo scan mantiene almeno una colonna anche per `COUNT(*)`: il provider V2 incluso
-nel runtime tenta altrimenti un query job BigQuery, negato al service account
-(`bigquery.jobs.create`), anche impostando `optimizedEmptyProjection=false`.
-Il conteggio usa così la Storage API e l'aggregazione Spark. Filtri e pruning delle
-altre colonne vengono delegati al provider, senza ampliare i permessi IAM.
+1. Spark legge dal catalog Lakehouse il testo SQL della vista e quello dei contratti.
+2. Risolve i nomi: `bq.…` con `BigQueryCatalog`, il resto con il catalog Lakehouse.
+3. Combina il filtro dell'utente con quelli del cut-over. Se un ramo non può avere
+   righe (qui: `< 2026-10-13` e `>= 2026-10-13` insieme), lo toglie dal piano e quella
+   sorgente non viene letta.
+4. Per il ramo BigQuery apre una read session della Storage Read API, passando
+   colonne e filtri. BigQuery restituisce solo le righe e le colonne richieste.
+5. Spark unisce le righe dei due rami e calcola il risultato.
 
-## File
+I dati BigQuery non vengono copiati in Iceberg né salvati da nessuna parte: vengono
+letti al momento della query. BigQuery non esegue SQL e non avvia query job: tutto
+il calcolo lo fa Spark. L'utente vede un'unica tabella e, con la vista attuale, non
+può sapere da quale sorgente arriva una riga. Se serve, si può aggiungere ai contratti
+una colonna `source`.
 
-- [build_catalog.py](build_catalog.py): compila il JAR contro le librerie del
-  runtime Dataproc e lo pubblica su GCS, senza sovrascrivere un JAR esistente.
-- [job.py](job.py): crea le viste oppure le consuma da un batch indipendente.
-  In modalità `verify` non registra relazioni e non ricrea viste o SQL di unione.
-- [run.ps1](run.ps1): upload e lancio da PowerShell, senza dipendenza da `.env`.
-- [probe_datasource.py](probe_datasource.py): verifica SQL diretto e registrazione
-  `USING bigquery` con il connettore incluso nell'immagine.
+Ogni job che legge la vista deve registrare entrambi i cataloghi. Se `bq` manca, la
+vista viene trovata ma la lettura fallisce.
 
-## Oggetti
+## 5. Modalità del job e controlli
 
-| Ruolo | Oggetto |
-|---|---|
-| BigQuery nativa | `skyita-da-architects-sandbox.dciciani.hit_data_stg_test` |
-| Iceberg | `dciciani-lakehouse-catalog.digital-analytics-myskyapp.hit_data_stg` |
-| Namespace dedicato | `dciciani-lakehouse-catalog.federation_layered_20261113` |
-| Contratti | `hit_data_native_contract` e `hit_data_iceberg_contract` |
-| Vista UNION | `hit_data_union_view` nel namespace dedicato |
-| Vista JOIN | `hit_data_join_view` nel namespace dedicato |
-| Output opzionale | `hit_data_union_materialized` nel namespace dedicato |
+| Modalità | Cosa fa | Controlli che fanno fallire il batch |
+|---|---|---|
+| `create` | Conta le due sorgenti, crea namespace, contratti, vista finale e JOIN | Colonne diverse tra le sorgenti; un ramo vuoto; `count(vista) ≠ count(BQ) + count(Iceberg)` |
+| `cutover-check` | Da un batch indipendente: conteggi per giorno e righe lette da ciascuno scan (metrica `numOutputRows`), con AQE disattivato perché il piano letto sia quello eseguito | Conteggi per giorno diversi dagli attesi; ramo BigQuery presente nelle query sui soli dati recenti; ramo Iceberg con righe nella query su un giorno di storico; un ramo assente nella query su tutta la vista |
+| `verify` | Da un batch indipendente: conta le righe della vista, conta la JOIN, opzionalmente materializza la vista in `hit_data_union_materialized` | Righe della vista ≠ `--expected`; righe della tabella materializzata ≠ righe della vista |
 
-Le sorgenti non vengono modificate. Il setup rifiuta viste e output già esistenti:
-per ripeterlo usare un nuovo namespace. La materializzazione è un output di test
-opzionale e non serve alla federazione.
+I batch consumer (`cutover-check` e `verify`) non registrano relazioni e non
+ricostruiscono SQL di unione: leggono soltanto la vista salvata.
 
-## Esecuzione
+## 6. Verifica del 18 novembre 2026
 
-Per verificare direttamente i metadati persistiti delle viste, senza avviare Spark:
-
-```powershell
-./tests/06_spark_iceberg_view/inspect_views.ps1
-```
-
-Lo script legge i file metadata dal warehouse, controlla `view-uuid`, versione
-corrente e rappresentazione SQL con dialect `spark`, poi stampa l'SQL delle tre
-viste e verifica i riferimenti ai due rami. La vista finale contiene la UNION
-delle viste di contratto; queste puntano rispettivamente al catalogo `bq` e alla
-tabella Iceberg. Non legge la tabella materializzata. Se trova più file metadata
-per una vista si ferma: in quel caso serve il puntatore corrente del catalogo REST.
-
-```powershell
-# Il default usa il JAR della correzione già compilato.
-./tests/06_spark_iceberg_view/run.ps1 -Mode create -Namespace test06_nuovo
-
-# Batch indipendente: legge le viste salvate e materializza l'UNION.
-./tests/06_spark_iceberg_view/run.ps1 -Mode verify -Namespace test06_nuovo -Expected 15679 -Materialize
-
-# Per ricompilare usare un percorso artefatti nuovo, e passarlo anche agli altri comandi.
-./tests/06_spark_iceberg_view/run.ps1 -Mode build -ArtifactPrefix gs://BUCKET/poc06/BUILD_UNIVOCA
-```
-
-Adeguare `Expected` ai conteggi prodotti dal setup se cambiano le sorgenti.
-
-## Perimetro
-
-- Il campione è quello del test 04: 9.955 righe nella nativa sandbox del
-  10 novembre e 5.724 righe Iceberg del 13 ottobre; totale di riferimento 15.679.
-  Il setup controlla i conteggi effettivi dei due rami.
-- Il contratto riprende il test 04: colonne esplicite per nome, tutte `STRING`
-  tranne `partition_date TIMESTAMP`. Nomi di colonna differenti fanno fallire il
-  setup. Non è ancora il contratto enterprise con tutti i tipi di business.
-- La JOIN usa `(id_hit_high, id_hit_low)`, come il test 02. Su giorni diversi è
-  atteso un risultato vuoto: non dimostra corrispondenze positive fra righe.
-- La UNION del 13 novembre verifica interoperabilità e persistenza. La continuità
-  al cut-over è verificata a parte, su un campione ordinato (sezione dedicata sotto).
-  Il setup rifiuta rami senza righe.
-- Il test usa la copia sandbox già esistente, senza creare nuove copie delle
-  sorgenti. L'accesso del service account alla tabella originale
-  `skyita-da-cmp-test.digital_skyita_myskyapp.hit_data_stg`, negato nel test 04,
-  resta un requisito IAM da verificare separatamente.
-- L'adattatore dipende dal provider V2 per Spark 3.5 e va riverificato cambiando
-  runtime/connettore. Benchmark, pruning, governance e resilienza restano da provare.
-
-## Diagnosi
-
-I probe originali dimostravano che il catalogo accetta viste ma non risolve nomi
-BigQuery senza catalogo. `parentProject` non modifica la risoluzione SQL.
-I nuovi probe `probe-datasource-20261113-1320` e
-`probe-datasource-v2-20261113` hanno verificato:
-
-| Tentativo | Esito nel runtime 2.3.43 |
-|---|---|
-| Query diretta `bigquery.` con nome BigQuery quotato | `UNSUPPORTED_DATASOURCE_FOR_DIRECT_QUERY` |
-| `CREATE TABLE ... USING bigquery OPTIONS (...)` | Registrazione riuscita |
-| Lettura della relazione nel session catalog | `bigquery is not a valid Spark SQL Data Source` |
-
-Il probe originale catturava gli errori e poteva risultare `SUCCEEDED` anche con
-una verifica fallita. I nuovi job falliscono se la verifica finale non passa.
-
-Il catalogo REST rifiuta con `BadRequestException: invalid argument` la UNION
-monolitica di 8.095 caratteri. Il probe [probe_catalog_views.py](probe_catalog_views.py)
-conferma che le viste con lo schema completo sono accettate, mentre anche una
-query con una sola colonna e circa 9.600 caratteri di commento viene rifiutata,
-sia con catalogo corrente predefinito sia esplicito. È quindi un vincolo sulla
-definizione, non sull'accesso cross-source o sul numero di colonne. La soglia
-esatta non è stata misurata; non assumere che sia quella delle viste BigQuery.
-Le due viste di contratto e la UNION finale di 206 caratteri sono accettate.
-
-## Verifica del 13 novembre 2026
-
-| Verifica | Esito |
-|---|---|
-| Compilazione sul runtime Dataproc | PASS, `build-bq-catalog-v3-20261113` |
-| Creazione contratti, UNION e JOIN | PASS, `poc06-create-20261113-144149` |
-| Schema UNION | 167 colonne |
-| Righe BigQuery / Iceberg | 9.955 / 5.724 |
-| Righe UNION | 15.679, uguali alla somma delle sorgenti |
-| Righe JOIN | 0, attese per giorni diversi |
-| Lettura da batch indipendente e materializzazione | PASS, `poc06-verify-20261113-144455`: 15.679 righe |
-
-Esecuzioni verificabili nella console:
-[setup](https://console.cloud.google.com/dataproc/batches/europe-west1/poc06-create-20261113-144149?project=skyita-da-architects-sandbox),
-[consumer indipendente](https://console.cloud.google.com/dataproc/batches/europe-west1/poc06-verify-20261113-144455?project=skyita-da-architects-sandbox).
-Entrambi i driver terminano con `STATUS: OK`. Il consumer ha creato
-`dciciani-lakehouse-catalog.federation_layered_20261113.hit_data_union_materialized`
-leggendo la vista salvata, senza ricostruire la federazione.
-
-L'assenza di un `TableCatalog` nel connettore standard non esclude un adattatore
-sul suo `TableProvider`. Riferimenti:
-[cataloghi Spark/Iceberg](https://iceberg.apache.org/docs/latest/spark-configuration/),
-[connettore ufficiale BigQuery](https://github.com/GoogleCloudDataproc/spark-bigquery-connector).
-
-## Verifica del cut-over del 16 novembre 2026
-
-Obiettivo: lo storico resta su BigQuery fino alla scadenza della retention, i
-dati nuovi stanno su Iceberg, e i job Spark leggono un'unica vista.
+Runtime Dataproc Serverless 2.3 (Spark 3.5.3), service account
+`dataproc@skyita-da-architects-sandbox.iam.gserviceaccount.com`, namespace
+`federation_native_catalog_20261118`, cut-over `2026-10-13`.
 
 ### Campione
 
@@ -170,76 +136,123 @@ dati nuovi stanno su Iceberg, e i job Spark leggono un'unica vista.
 | BigQuery, storico | `skyita-da-architects-sandbox.dciciani.hit_data_stg_hist` | 2026-10-08 (2.171), 2026-10-12 (30.659), 2026-10-13 (7.104) |
 | Iceberg, corrente | `dciciani-lakehouse-catalog.digital-analytics-myskyapp.hit_data_stg` | 2026-10-13 (5.724) |
 
-La copia è una CTAS dall'originale `skyita-da-cmp-test.digital_skyita_myskyapp.hit_data_stg`,
-partizionata per giorno, creata con utenza personale (il service account Dataproc
-non legge l'originale). Nell'originale non ci sono i giorni dal 9 all'11 ottobre.
-Il 13 ottobre è presente su entrambi i lati, con conteggi diversi, per verificare
-che il giorno del cut-over venga letto da un solo ramo. Cut-over: `2026-10-13`.
+`hit_data_stg_hist` è una copia CTAS della tabella originale
+`skyita-da-cmp-test.digital_skyita_myskyapp.hit_data_stg`, fatta con utenza personale
+perché il service account Dataproc non può leggere l'originale (403). Il 13 ottobre è
+presente su entrambe le sorgenti con conteggi diversi, per verificare che il giorno di
+cut-over venga letto da un solo ramo.
 
-### Struttura delle viste
+### Batch
 
-Namespace `federation_cutover_20261116b`. Le viste di contratto normalizzano le
-sorgenti senza filtri. Il cut-over sta solo nella vista finale (319 caratteri):
+| Batch | Modalità | Esito |
+|---|---|---|
+| `poc06-create-20261118-093051` | create | `STATUS: OK`: sorgenti 32.830 (BigQuery, prima del cut-over) e 5.724 (Iceberg) |
+| `poc06-cutover-check-20261118-093420` | cutover-check | `STATUS: OK`, nessun errore |
+| `poc06-verify-20261118-093733` | verify `-Expected 38554 -Materialize` | `STATUS: OK`: 38.554 righe, JOIN 5.724, materializzazione riuscita |
 
-```sql
-SELECT * FROM hit_data_native_contract  WHERE partition_date <  TIMESTAMP '2026-10-13 00:00:00'
-UNION ALL
-SELECT * FROM hit_data_iceberg_contract WHERE partition_date >= TIMESTAMP '2026-10-13 00:00:00'
-```
-
-Quando lo storico è scaduto basta ridefinire questa vista con il solo ramo Iceberg.
-Il nome resta lo stesso e i consumer non cambiano.
-
-**Limite del catalogo REST.** Il primo tentativo metteva il filtro nei contratti.
-Il contratto BigQuery con il filtro (4.094 caratteri) è stato accettato, quello
-Iceberg (4.101 caratteri) è stato rifiutato con `BadRequestException: invalid argument`.
-I contratti senza filtro (4.039 e 4.045 caratteri) sono accettati. Il dato è
-compatibile con un limite di 4.096 caratteri sul testo della vista. Il namespace
-`federation_cutover_20261116` del primo tentativo contiene solo
-`hit_data_native_contract` e può essere eliminato.
-
-### Esito
-
-Batch `poc06-create-20261116-163521` (setup) e `poc06-cutover-check-20261116-163832`
-(consumer indipendente, modalità `cutover-check`), entrambi `STATUS: OK`.
+### Risultati
 
 | Verifica | Atteso | Ottenuto |
 |---|---|---|
 | Righe totali della vista | 32.830 + 5.724 = 38.554 | 38.554 |
 | 2026-10-08 / 2026-10-12 | da BigQuery: 2.171 / 30.659 | 2.171 / 30.659 |
 | 2026-10-13 | solo da Iceberg: 5.724 (non 7.104 né 12.828) | 5.724 |
-| JOIN sulla chiave hit (senza cut-over) | corrispondenze sul 13 ottobre | 5.724 righe |
 
-Righe lette da ogni ramo, misurate con la metrica `numOutputRows` degli scan:
+| Query sulla vista | Righe | Scan BigQuery | Scan Iceberg |
+|---|---|---|---|
+| `partition_date >= '2026-10-13'` (solo recenti) | 5.724 | **assente dal piano**, nessuna read session | 5.724 |
+| solo `2026-10-08` (un giorno di storico) | 2.171 | 2.171: filtro applicato da BigQuery | 0: nessun file letto |
+| `partition_date IS NOT NULL` (tutta la vista) | 38.554 | 32.830 | 5.724 |
 
-| Query sulla vista | Scan BigQuery | Scan Iceberg |
+Sono gli stessi numeri della soluzione custom del 16 novembre (§8).
+
+**Nessun query job BigQuery.** Il service account non ha `bigquery.jobs.create`:
+un query job sarebbe fallito con 403 e avrebbe fatto fallire il batch. Nei log ci
+sono solo read session della Storage Read API (`ReadSessionCreator`).
+
+## 7. Come mostrarlo nella Spark UI
+
+Console GCP → Dataproc → Serverless → Batches → `poc06-cutover-check-20261118-093420`
+→ **View Spark UI** → scheda **SQL / DataFrame**. Le query 0–2 (`job.py:95`) sono i
+conteggi di supporto per giorno. Le query 3–5 (`job.py:121`) sono le tre query sulla
+vista da mostrare:
+
+| ID | Query | Cosa mostra il grafo |
 |---|---|---|
-| `partition_date >= '2026-10-13'` (solo recenti) | **assente dal piano**, nessuna read session | 5.724 |
-| solo `2026-10-08` (un giorno di storico) | 2.171 su 32.830: filtro applicato da BigQuery | 0, filtri contraddittori applicati in planning |
-| tutta la vista | 32.830 | 5.724 |
+| 3 | solo dati recenti | Un solo `BatchScan`, sulla tabella Iceberg: 5.724 righe. Nessun nodo BigQuery |
+| 4 | solo 2026-10-08 | `Union` con `BatchScan hit_data_stg_hist` (BigQuery) a 2.171 righe e scan Iceberg a 0 righe |
+| 5 | tutta la vista | `Union` con BigQuery a 32.830 righe e Iceberg a 5.724 |
 
-Conseguenze per la transizione:
+Nella query 4 lo scan Iceberg compare nel piano, ma i filtri sui metadati Iceberg
+escludono tutti i file, quindi non legge dati. Gli altri nodi (`ColumnarToRow`,
+`Filter`, `Project`, `HashAggregate`) sono passaggi interni di Spark.
 
-- le query sui dati recenti non dipendono da BigQuery: niente costi Storage API,
-  permessi o disponibilità del connettore;
-- le query sullo storico leggono da BigQuery solo i giorni richiesti, perché
-  `partition_date` resta `TIMESTAMP` su entrambi i lati e il contratto non lo converte;
-- il giorno del cut-over non viene duplicato.
+## 8. Limiti e punti aperti
 
-### Limiti
+- **`COUNT(*)` diretto su `bq.`.** Con una proiezione vuota il connettore può lanciare
+  un query job BigQuery, che con i permessi attuali fallirebbe. Nei batch del 18/11
+  il caso non si è presentato, ma un `SELECT COUNT(*)` diretto sulla tabella `bq.`
+  senza colonne non è stato provato. Se servisse, la soluzione è concedere
+  `bigquery.jobs.create`, non tornare al catalogo custom.
+- **Scrittura.** Il catalogo nativo può anche creare e cancellare tabelle BigQuery
+  (`createTable`, `dropTable`). La sola lettura va imposta con i permessi IAM.
+- **Configurazione dei consumer.** Ogni job deve avere entrambi i cataloghi:
+  conviene un template di batch standard.
+- **Accesso alla tabella originale.** Il service account Dataproc riceve 403 su
+  `skyita-da-cmp-test.digital_skyita_myskyapp.hit_data_stg`: è un requisito IAM aperto.
+- **Selezione della sorgente solo su `partition_date`.** È verificata solo per filtri
+  su `partition_date`. Filtri su colonne convertite a `STRING` dal contratto potrebbero
+  non arrivare a BigQuery: il risultato resta corretto, ma BigQuery legge più dati.
+- **Solo Spark.** La vista è SQL Spark e altri motori non la leggono. BigQuery usa la
+  propria vista (test 05), che non ha il cut-over.
+- **Limite di dimensione delle viste.** Circa 4.096 caratteri nel catalog REST:
+  impone i due livelli di viste.
+- **Volumi.** Campione di 38.554 righe: prestazioni e costi della Storage Read API su
+  dati reali sono da misurare.
+- **Regressione.** L'esclusione del ramo BigQuery è stata osservata su Spark 3.5.3:
+  `run.ps1 -Mode cutover-check` va rieseguito a ogni cambio di runtime.
 
-- L'eliminazione del ramo BigQuery è un comportamento osservato su Spark 3.5.3
-  (Dataproc 2.3). Va ricontrollata a ogni aggiornamento del runtime, insieme
-  all'adattatore: `run.ps1 -Mode cutover-check` serve come test di regressione.
-- Campione di 38.554 righe: prestazioni e costi su volumi reali sono ancora da misurare.
-- Il pruning è garantito solo per i filtri su `partition_date`. Filtri su colonne
-  convertite dal contratto (`CAST ... AS STRING`) potrebbero non arrivare a BigQuery.
+## 9. Storia: diagnosi e soluzione custom
 
-### Riesecuzione
+### Diagnosi del 13 novembre (mattina)
 
-```powershell
-./tests/06_spark_iceberg_view/run.ps1 -Mode create -Namespace <nuovo_namespace> `
-  -Native skyita-da-architects-sandbox.dciciani.hit_data_stg_hist -Cutover 2026-10-13
-./tests/06_spark_iceberg_view/run.ps1 -Mode cutover-check -Namespace <nuovo_namespace> `
-  -Native skyita-da-architects-sandbox.dciciani.hit_data_stg_hist -Cutover 2026-10-13
-```
+| Probe | Prova | Esito |
+|---|---|---|
+| `probe-view-20261113-010212` | `CREATE VIEW` Iceberg su tabella Iceberg | OK: il catalog accetta viste da Spark |
+| `probe-view-20261113-010212` | `CREATE VIEW` con nome BigQuery a tre parti | `REQUIRES_SINGLE_PART_NAMESPACE` |
+| `probe-view-20261113-123408` | Nome a due parti con `parentProject` | `TABLE_OR_VIEW_NOT_FOUND` |
+| `probe-datasource-20261113-1320` | Query diretta `bigquery.`<nome> | `UNSUPPORTED_DATASOURCE_FOR_DIRECT_QUERY` |
+| `probe-datasource-v2-20261113` | `CREATE TABLE ... USING bigquery` nel session catalog e lettura | Registrazione OK, lettura: `bigquery is not a valid Spark SQL Data Source` |
+
+Conclusione corretta: serve un catalogo Spark per BigQuery. Conclusione sbagliata:
+"il connettore non lo offre". Era stato controllato solo
+`spark-bigquery-with-dependencies_2.13-0.46.1`, che non contiene il catalogo, e non
+`spark-3.5-bigquery`, che lo contiene.
+
+### Soluzione custom del 13 e 16 novembre
+
+[BigQueryReadOnlyCatalog.java](BigQueryReadOnlyCatalog.java) è un `TableCatalog` in
+sola lettura che risolve `bq.progetto.dataset.tabella` e passa schema e letture a
+`Spark35BigQueryTableProvider`, la classe interna del connettore. Per evitare query job
+mantiene sempre almeno una colonna nello scan, anche per `COUNT(*)`. Va compilato con
+[build_catalog.py](build_catalog.py) e caricato con `--jars`; si usa lanciando `run.ps1`
+con lo switch `-CustomCatalog`.
+
+| Data | Batch | Risultato |
+|---|---|---|
+| 13/11 | `build-bq-catalog-v3-20261113` | Compilazione del JAR |
+| 13/11 | `poc06-create-20261113-144149`, `poc06-verify-20261113-144455` | UNION 15.679 righe (9.955 BQ del 10/11 + 5.724 Iceberg), 167 colonne, JOIN 0 righe (giorni diversi), materializzazione OK |
+| 16/11 | `poc06-create-20261116-163521`, `poc06-cutover-check-20261116-163832` | Cut-over: stessi risultati del §6 |
+
+### Confronto
+
+| | Catalogo custom | Catalogo nativo |
+|---|---|---|
+| Classe | `poc.BigQueryReadOnlyCatalog` | `com.google.cloud.spark.bigquery.BigQueryCatalog` |
+| JAR da compilare e caricare | Sì | No |
+| Manutenzione | Dipende da una classe interna del connettore, da ricontrollare a ogni runtime | A carico di Google |
+| Lettura/scrittura | Solo lettura | Lettura e scrittura (limitare via IAM) |
+| `COUNT(*)` senza colonne | Gestito: niente query job | Non provato (§8) |
+| Risultati del test | PASS | PASS, stessi numeri |
+
+Il catalogo custom resta nel repository come riferimento, ma non serve per il test 06.

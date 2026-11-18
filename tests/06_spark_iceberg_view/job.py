@@ -1,6 +1,7 @@
 """Create or independently consume persistent Iceberg views of BigQuery + Iceberg.
 
-The bq catalog is supplied by BigQueryReadOnlyCatalog.java. Consumer mode never
+The bq catalog is configured by run.ps1: by default the connector's built-in
+com.google.cloud.spark.bigquery.BigQueryCatalog (legacy: BigQueryReadOnlyCatalog.java). Consumer mode never
 registers relations, creates temporary views, or reconstructs federation SQL.
 The default test is interoperability UNION ALL (same data as test 04), not cutover.
 """
